@@ -5,11 +5,13 @@
 
 ## Public URL
 
-<!-- TODO: dán URL public sau khi deploy, vd https://k5-day14-agent.up.railway.app -->
+**https://k5-l3b-day14-tranminhduc-2a202603977-deployment-production.up.railway.app**
 
 ## Platform
 
-<!-- TODO: ghi Railway hoặc Render -->
+**Railway** (region US West, 1 replica, Trial plan).
+
+Deploy từ GitHub repo `tmduc23/K5-L3B-Day14-TranMinhDuc-2A202603977-Deployment-Agent-Benchmark-Observability`, branch `main`, **Root Directory = `06-lab-complete`**. Railway build bằng `Dockerfile` multi-stage của Part 6 (builder `DOCKERFILE` khai trong `railway.toml`), không dùng Nixpacks.
 
 Config dùng để deploy: [`06-lab-complete/railway.toml`](06-lab-complete/railway.toml) (Railway) hoặc [`06-lab-complete/render.yaml`](06-lab-complete/render.yaml) (Render). Cả hai đã viết sẵn trong repo.
 
@@ -54,8 +56,28 @@ curl -s -o /dev/null -w "with-key: %{http_code}\n" -X POST $BASE/ask \
 ### Kết quả thực tế
 
 ```
-<!-- TODO: dán output 4 lệnh trên -->
+health:   200
+ready:    200
+no-key:   401
+with-key: 200
 ```
+
+Body trả về của từng lệnh:
+
+```json
+// GET /health
+{"status":"ok","uptime_seconds":174.9,"version":"1.0.0","environment":"production",
+ "redis_connected":true,"timestamp":"2026-11-26T12:20:01.050723+00:00"}
+
+// GET /ready
+{"ready":true,"redis_connected":true}
+
+// POST /ask  (có X-API-Key)
+{"question":"Hello","answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận.",
+ "cost_usd":1.035e-05}
+```
+
+`"redis_connected": true` ở cả hai endpoint xác nhận biến tham chiếu `REDIS_URL=${{Redis-FupV.REDIS_URL}}` đã resolve đúng tới service Redis trong cùng project. `"environment":"production"` xác nhận agent đọc được biến môi trường đặt trên nền tảng chứ không dùng default trong code.
 
 ### Kiểm tra thêm — rate limit trên môi trường thật
 
@@ -69,8 +91,25 @@ done
 ```
 
 ```
-<!-- TODO: dán output — kỳ vọng 429 từ request thứ 11 (RATE_LIMIT_PER_MINUTE=10) -->
+req  1: 200    req  6: 200    req 11: 429
+req  2: 200    req  7: 200    req 12: 429
+req  3: 200    req  8: 200    req 13: 429
+req  4: 200    req  9: 200    req 14: 429
+req  5: 200    req 10: 429    req 15: 429
 ```
+
+Header khi bị chặn:
+
+```
+HTTP/1.1 429 Too Many Requests
+retry-after: 43
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+```
+
+Chỉ 9 request lọt trong vòng lặp này thay vì 10, vì lệnh test `/ask` ở phần trên đã chiếm một suất — tổng vẫn đúng **10 request / 60 giây** theo `RATE_LIMIT_PER_MINUTE`. Sliding window tính từ thời điểm request đầu tiên chứ không reset theo phút chẵn.
+
+`retry-after: 43` là số giây còn lại tới khi request cũ nhất rời khỏi cửa sổ — giá trị động, không phải hằng số.
 
 ## Environment Variables Set
 
@@ -86,7 +125,9 @@ done
 | `MONTHLY_BUDGET_USD` | `10.0` | |
 | `PORT` | *(nền tảng tự cấp)* | **Không đặt tay.** Dockerfile dùng `${PORT:-8000}` |
 
-<!-- TODO: đánh dấu những biến bạn đã thực sự đặt trên dashboard -->
+Đã đặt trên Railway Variables (xác nhận qua `Details` trước khi Deploy): `AGENT_API_KEY`, `ENVIRONMENT`, `RATE_LIMIT_PER_MINUTE`, `DAILY_BUDGET_USD`, `MONTHLY_BUDGET_USD`, `REDIS_URL`.
+
+`PORT` **không** đặt — Railway tự inject, và `CMD` trong Dockerfile dùng `${PORT:-8000}` nên tự nhận. Đặt tay sẽ ghi đè giá trị nền tảng cấp và làm health check fail.
 
 ## Screenshots
 

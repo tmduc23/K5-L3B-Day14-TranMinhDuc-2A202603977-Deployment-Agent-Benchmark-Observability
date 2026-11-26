@@ -465,11 +465,49 @@ docker compose down
 
 ### Exercise 3.1 / 3.2 — Deploy agent Part 6
 
-- Nền tảng chính: <!-- TODO: Railway hoặc Render -->
-- URL public: <!-- TODO -->
-- Screenshot: `screenshots/` <!-- TODO -->
+- **Nền tảng chính:** Railway (Trial plan, region US West, 1 replica)
+- **URL public:** https://k5-l3b-day14-tranminhduc-2a202603977-deployment-production.up.railway.app
+- **Thư mục deploy:** `06-lab-complete/` (bản đã `PASS 12/12`), Root Directory đặt trong Railway Settings
+- **Screenshot:** `screenshots/` <!-- TODO: chụp dashboard.png, running.png, test.png -->
 
-Chi tiết xem `DEPLOYMENT.md`.
+**Kết quả 4 lệnh tự kiểm tra của CP6:**
+
+```
+health:   200
+ready:    200
+no-key:   401
+with-key: 200
+```
+
+```json
+// GET /health
+{"status":"ok","uptime_seconds":174.9,"version":"1.0.0","environment":"production",
+ "redis_connected":true,"timestamp":"2026-11-26T12:20:01.050723+00:00"}
+
+// POST /ask  (có X-API-Key)
+{"question":"Hello","answer":"Tôi là AI agent được deploy lên cloud...","cost_usd":1.035e-05}
+```
+
+**Rate limit trên môi trường thật** — 15 request liên tiếp:
+
+```
+req 1-9: 200     req 10-15: 429
+retry-after: 43   x-ratelimit-limit: 10   x-ratelimit-remaining: 0
+```
+
+Ba điều output này xác nhận, mà chạy local không chứng minh được:
+
+1. **`"environment":"production"`** — agent đọc biến môi trường đặt trên nền tảng, không dùng default trong code. Đây là tiêu chí "Biến môi trường đặt trên nền tảng, không ghi trong code" (2 điểm RUBRIC Part 6).
+2. **`"redis_connected":true`** — tham chiếu `REDIS_URL=${{Redis-FupV.REDIS_URL}}` resolve đúng tới service Redis trong cùng project. Rate limit và cost guard dùng chung Redis này.
+3. **Rate limit chặn đúng ở request thứ 10** — state nằm trong Redis thật trên cloud, không phải RAM của process.
+
+**Hai vướng mắc khi deploy:**
+
+**1. Railway từ chối tạo service: `Invalid service name`.** Railway lấy tên repo làm tên service, mà tên repo dài 71 ký tự có chữ hoa nên không hợp lệ. Cách vòng: tạo **Empty project** trước, rồi mới thêm service từ trong project — lúc đó Railway không ép tên theo repo nữa.
+
+**2. Tên service Redis không phải `Redis`.** Railway đặt tên `Redis-FupV`, nên tham chiếu `${{Redis.REDIS_URL}}` không resolve được. Phải dùng đúng `${{Redis-FupV.REDIS_URL}}`. Cách an toàn là gõ `${{` rồi chọn từ danh sách gợi ý thay vì gõ tay.
+
+Chi tiết đầy đủ xem [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ### So sánh `railway.toml` với `render.yaml`
 
