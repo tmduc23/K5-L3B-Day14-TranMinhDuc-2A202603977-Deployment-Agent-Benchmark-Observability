@@ -1056,11 +1056,37 @@ Chỉ nginx publish port ra host; 3 agent và Redis chỉ mở cổng trong netw
 
 ## Part 6 — Output `check_production_ready.py`
 
-Dán phần "📋 Checklist Deliverable" của output (chạy đầy đủ, có Docker, phải `PASS 12/12`):
+Chạy đầy đủ (có Docker, không `--static-only` / `--skip-docker`):
 
 ```
-<!-- TODO -->
+================================================================
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 41/41 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
 ```
+
+Vài số đo đáng chú ý từ lần chấm:
+
+- **Image 311 MB** (yêu cầu < 500 MB) — multi-stage + `python:3.11-slim`
+- **Rate limit: 429 sau đúng 5 request**, và **vẫn 429 sau khi restart agent** → state nằm trong Redis
+- **Cost guard: 402 ở request thứ 2** với budget 0.000001 USD
+- **Redis mất kết nối → `/ready` 503 còn `/health` vẫn 200** — đúng tách bạch liveness/readiness
+- **33 dòng log JSON, không dòng nào hỏng**
+- **`docker stop` exit code 0 trong 1.0 giây** — nhờ `exec` trong CMD để uvicorn là PID 1
 
 ---
 

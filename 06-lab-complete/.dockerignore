@@ -1,7 +1,49 @@
 # ============================================================
-# TODO (tiêu chí 3): liệt kê những gì KHÔNG được đưa vào Docker image
-#   • secrets: .env, .env.*  (nhưng giữ lại .env.example)
-#   • Python cache: __pycache__/, *.pyc
-#   • virtualenv: venv/, .venv/
-#   • .git/, tài liệu, thư mục benchmark-observability/ (Part 7)...
+# Những gì KHÔNG được đưa vào Docker image (tiêu chí 3)
+# Image nhỏ hơn, build nhanh hơn, và quan trọng nhất: không lọt secret.
 # ============================================================
+
+# ── Secrets — lý do quan trọng nhất của file này ──
+.env
+.env.*
+!.env.example
+
+# ── Python cache — vô dụng trong image, còn gây lệch kiến trúc ──
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Virtualenv — nặng hàng trăm MB, và build cho OS của máy dev ──
+venv/
+.venv/
+env/
+ENV/
+
+# ── Git & IDE ──
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# ── Tài liệu, không cần lúc runtime ──
+*.md
+README.md
+screenshots/
+
+# ── Part 7, không thuộc image của Part 6 ──
+benchmark-observability/
+reports/
+benchmark-results/
+
+# ── Script chấm bài, chạy ngoài container ──
+check_production_ready.py
+
+# ── Khác ──
+*.log
+.DS_Store
+Thumbs.db
