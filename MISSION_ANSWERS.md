@@ -473,11 +473,67 @@ Chi tiết xem `DEPLOYMENT.md`.
 
 ### So sánh `railway.toml` với `render.yaml`
 
-<!-- TODO: khác nhau chỗ nào, vì sao (3 điểm RUBRIC Part 3) -->
+Mình viết cả hai file trong `06-lab-complete/` để so trực tiếp.
+
+| | `railway.toml` | `render.yaml` |
+|---|---|---|
+| Định dạng | TOML | YAML |
+| Phạm vi khai báo | **Chỉ app** | **Cả app lẫn hạ tầng** |
+| Khai báo Redis | Không được — phải bấm "Add Redis" trên dashboard | `- type: redis` ngay trong file |
+| Lấy `REDIS_URL` | Railway tự inject biến khi link service | `fromService: property: connectionString` |
+| Sinh secret | Không có cơ chế — tự đặt trong tab Variables | `generateValue: true` để Render tự sinh |
+| Secret đặt tay | Đặt trên dashboard, không khai trong file | `sync: false` — khai tên biến, giá trị điền sau |
+| Health check | `healthcheckPath` | `healthCheckPath` (khác hoa/thường chữ C) |
+| Chọn builder | `builder = "DOCKERFILE"` | `runtime: docker` + `dockerfilePath` |
+| Số replica | `numReplicas` | Thuộc plan, không khai trong file |
+
+**Khác biệt cốt lõi: `render.yaml` là Infrastructure as Code, `railway.toml` thì không.**
+
+File Render mô tả **toàn bộ hệ thống** — web service, Redis, cách chúng nối với nhau, cách sinh secret. Clone repo vào tài khoản Render trắng rồi bấm Blueprint là dựng lại đủ. Ba dòng này làm được điều railway.toml không làm được:
+
+```yaml
+- key: REDIS_URL
+  fromService:
+    type: redis
+    name: k5-day14-redis
+    property: connectionString
+```
+
+Quan hệ giữa agent và Redis nằm trong Git, review được như code.
+
+`railway.toml` chỉ mô tả **cách build và chạy một service**. Redis, biến môi trường, quan hệ giữa các service đều sống trên dashboard — tức là click-ops. Muốn dựng lại môi trường thì phải nhớ đã bấm những gì.
+
+**Vì sao vẫn chọn Railway làm nền tảng chính:** đổi lại sự đơn giản. `railway.toml` 9 dòng, deploy xong trong vài phút; `render.yaml` 40 dòng và phải hiểu Blueprint spec. Với một agent đơn lẻ trong bài lab, chênh lệch về khả năng tái lập không bù được thời gian. Với hệ thống nhiều service chạy thật thì ngược lại — IaC thắng rõ ràng.
+
+**Một điểm chung quan trọng:** cả hai đều **không** khai port. Dockerfile dùng `${PORT:-8000}` nên tự nhận port nền tảng cấp — đúng bài học anti-pattern #7 của Part 1.
 
 ### Exercise 3.3 — Pipeline Cloud Run
 
-<!-- TODO: đọc 03-cloud-deployment/production-cloud-run/cloudbuild.yaml và service.yaml, viết 3–5 dòng mô tả pipeline CI/CD đi qua những bước nào. Không cần deploy. (1 điểm) -->
+Đọc `03-cloud-deployment/production-cloud-run/cloudbuild.yaml` và `service.yaml`.
+
+**`cloudbuild.yaml` — pipeline CI/CD 4 bước**, trigger khi push lên `main`:
+
+1. **test** — container `python:3.11-slim` cài deps rồi chạy `pytest tests/`. Fail là dừng cả pipeline, không build gì.
+2. **build** (`waitFor: [test]`) — build image, gắn hai tag: `$COMMIT_SHA` và `latest`. Dùng `--cache-from=...:latest` để tái dùng layer của lần build trước.
+3. **push** (`waitFor: [build]`) — đẩy cả hai tag lên Container Registry.
+4. **deploy** (`waitFor: [push]`) — `gcloud run deploy` với image gắn **`$COMMIT_SHA`**, không phải `latest`.
+
+Ba điểm thiết kế đáng chú ý:
+
+**`waitFor` tạo chuỗi tuần tự nghiêm ngặt.** Không có nó, Cloud Build chạy song song các step. Ở đây test phải xong mới build, build xong mới push — image hỏng không bao giờ tới được production.
+
+**Deploy bằng `$COMMIT_SHA` chứ không phải `latest`.** Mỗi revision gắn với đúng một commit, nên biết chính xác đang chạy code nào và rollback được về revision cụ thể. Deploy bằng `latest` thì không ai chắc tag đó đang trỏ vào commit nào.
+
+**`--set-secrets=OPENAI_API_KEY=openai-key:latest`** — secret lấy từ Secret Manager lúc deploy, không nằm trong image cũng không trong file cấu hình. Đúng nguyên tắc Part 1.
+
+**`service.yaml` — khai báo trạng thái mong muốn (IaC)**, thay vì chuỗi lệnh:
+
+- `minScale: "1"` giữ 1 instance thường trực để tránh cold start; `maxScale: "10"` chặn chi phí khi traffic tăng đột biến
+- `containerConcurrency: 80` — mỗi instance nhận tối đa 80 request đồng thời. Đây là thứ khiến Cloud Run khác Lambda: một instance phục vụ nhiều request cùng lúc, nên **agent bắt buộc phải stateless**
+- Secret qua `secretKeyRef`, không ghi giá trị
+- `resources.limits` 1 CPU / 512Mi, `requests` 0.5 CPU / 256Mi
+
+Hai file chia vai rõ: `cloudbuild.yaml` trả lời *"làm thế nào để đưa code lên"*, `service.yaml` trả lời *"hệ thống phải trông như thế nào"*. `gcloud run services replace service.yaml` áp đặt trạng thái đó bất kể hiện tại ra sao.
 
 ---
 
