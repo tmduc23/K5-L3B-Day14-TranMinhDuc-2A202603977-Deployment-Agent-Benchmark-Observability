@@ -131,11 +131,12 @@ Chỉ 9 request lọt trong vòng lặp này thay vì 10, vì lệnh test `/ask`
 
 ## Screenshots
 
-- [ ] `screenshots/dashboard.png` — trang quản lý project, thấy service đang chạy
-- [ ] `screenshots/running.png` — log khởi động của agent (dòng JSON `"event": "startup"`)
+- [x] [`screenshots/dashboard.png`](screenshots/dashboard.png) — Railway Deployments: trạng thái **ACTIVE**, "Deployment successful", domain public, region US West, 1 replica
+- [x] [`screenshots/running.png`](screenshots/running.png) — gọi URL public từ trình duyệt, agent trả JSON:
+      `{"app":"Production AI Agent","version":"1.0.0","environment":"production","endpoints":["/health","/ready","/ask","/usage"]}`
 - [ ] `screenshots/test.png` — output 4 lệnh curl ở trên
 
-<!-- TODO: chụp 3 ảnh, lưu vào screenshots/ rồi đổi [ ] thành [x] -->
+<!-- TODO: chụp test.png (nhớ để dòng KEY=... ra ngoài khung hình) -->
 
 ## Ghi chú khi deploy
 
