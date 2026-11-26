@@ -25,6 +25,13 @@ RUN chown -R agent:agent /app
 
 USER agent
 
+# HOME phải trỏ tới /home/agent, nếu không agent sẽ không import được thư viện.
+# Lý do: useradd ở trên đặt home là /app (-d /app), trong khi dependencies được
+# copy vào /home/agent/.local. Python tìm user site-packages theo $HOME, nên nó
+# tìm /app/.local (không tồn tại) và bỏ qua /home/agent/.local.
+# Triệu chứng: script uvicorn chạy được (nằm trong PATH) nhưng ném
+# ModuleNotFoundError: No module named 'uvicorn' → container restart vô hạn.
+ENV HOME=/home/agent
 ENV PATH=/home/agent/.local/bin:$PATH
 ENV PYTHONPATH=/app
 ENV PYTHONDONTWRITEBYTECODE=1
