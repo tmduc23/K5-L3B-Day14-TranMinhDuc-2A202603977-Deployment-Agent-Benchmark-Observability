@@ -89,8 +89,10 @@ services:
   nginx:
     image: nginx:alpine
     ports:
-      - "80:80"      # HTTP
-      - "443:443"    # HTTPS (cần cert)
+      # Port 80 trên máy này bị Windows (http.sys, PID 4) giữ và nằm trong
+      # excluded port range → đổi sang 8080. Trong container vẫn là 80.
+      - "8080:80"    # HTTP
+      - "8443:443"   # HTTPS (cần cert)
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
