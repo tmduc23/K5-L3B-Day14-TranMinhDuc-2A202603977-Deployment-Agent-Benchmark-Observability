@@ -513,15 +513,250 @@ pkill -f "python app.py"
 
 **Bài học:** uvicorn in log ứng dụng *trước khi* bind port, nên thấy log khởi động không có nghĩa server đang phục vụ. Chỉ dòng `Uvicorn running on http://0.0.0.0:8000` mới xác nhận điều đó. Đây đúng là loại lỗi "im lặng" mà readiness probe sinh ra để bắt — app tưởng đã chạy nhưng thực tế không nhận được request nào.
 
-429 — vượt rate limit (dùng vòng lặp curl của chính bạn):
+#### Exercise 4.2 — JWT Authentication (`04-api-gateway/production/`)
+
+**JWT khác API key ở đâu:**
+
+| | API key (4.1) | JWT (4.2) |
+|---|---|---|
+| Nội dung | Chuỗi vô nghĩa | Chứa `sub`, `role`, `iat`, `exp` |
+| Xác thực | Phải tra DB xem key hợp lệ | Chỉ kiểm chữ ký, **không tra DB** |
+| Hết hạn | Không, trừ khi tự revoke | Tự hết hạn (60 phút, `auth.py:24`) |
+| Phân quyền | Phải tra DB xem key thuộc ai | Role nằm sẵn trong token |
+
+Token gồm 3 phần `header.payload.signature`. Giải mã phần payload:
+
+```bash
+echo $TOKEN | cut -d. -f2 | base64 -d
+```
+```json
+{"sub":"student","role":"user","iat":1795684855,"exp":1795688455}
+```
+
+**Điểm quan trọng: payload chỉ base64-encode, KHÔNG mã hoá bí mật.** Ai cầm token cũng đọc được nội dung — như lệnh trên chứng minh. Chữ ký chỉ đảm bảo không ai *sửa* được nội dung, chứ không *giấu* nội dung. Vì vậy không bao giờ đặt dữ liệu nhạy cảm (mật khẩu, số thẻ) vào payload.
+
+Hệ quả: `SECRET_KEY` (`auth.py:22`) phải tuyệt đối kín. Ai có nó thì tự ký được token `{"role": "admin"}` cho chính mình — bỏ qua toàn bộ lớp đăng nhập.
+
+**Hai chỗ `CODE_LAB.md` ghi sai:** endpoint là `/auth/token` chứ không phải `/token` (`app.py:105`), và tài khoản không phải `admin/secret`. Tài khoản thật (`auth.py:28-29`):
+
+| Username | Password | Role | Rate limit |
+|---|---|---|---|
+| `student` | `demo123` | user | 10/phút |
+| `teacher` | `teach456` | admin | 100/phút |
+
+Lấy token:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"username":"student","password":"demo123"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+
+Gọi không kèm token → **401**:
+```
+HTTP 401
+```
+
+#### Exercise 4.3 — Rate limiting
+
+**Ba câu hỏi:**
+
+1. **Algorithm:** Sliding Window Counter (`rate_limiter.py:7`). Mỗi user có một `deque` chứa timestamp; mỗi lần `check()` vứt bỏ timestamp cũ hơn window rồi đếm phần còn lại (dòng 39–40).
+2. **Limit:** 10 req/60s cho user, 100 req/60s cho admin — hai singleton riêng (dòng 86–87).
+3. **Admin "bypass" thế nào:** không bypass, mà *dùng limiter khác*. `app.py:141` chọn theo role đọc từ JWT:
+   ```python
+   limiter = rate_limiter_admin if role == "admin" else rate_limiter_user
+   ```
+   Đây chính là chỗ JWT có giá trị: role nằm sẵn trong token nên không phải tra DB mỗi request.
+
+**Vòng lặp 15 request với token `student`:**
+
+```bash
+for i in $(seq 1 15); do
+  printf "req %2d: " $i
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/ask \
+    -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d "{\"question\":\"Test $i\"}"
+done
+```
 
 ```
-<!-- TODO -->
+req  1: 200    req  6: 200    req 11: 429
+req  2: 200    req  7: 200    req 12: 429
+req  3: 200    req  8: 200    req 13: 429
+req  4: 200    req  9: 200    req 14: 429
+req  5: 200    req 10: 200    req 15: 429
 ```
+
+Đúng 10 request lọt, request thứ 11 trở đi bị chặn.
+
+**Header và body khi bị chặn:**
+
+```
+HTTP/1.1 429 Too Many Requests
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1795684915
+retry-after: 51
+```
+```json
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":51}}
+```
+
+`Retry-After: 51` là cách chuẩn để client biết phải chờ bao lâu — giá trị này tính từ timestamp cũ nhất còn trong window (`rate_limiter.py:47`), không phải một con số cố định.
+
+**Kiểm chứng phân quyền — cùng lúc đó, token `teacher` (admin) gọi 15 lần:**
+
+```
+200 200 200 200 200 200 200 200 200 200 200 200 200 200 200
+```
+
+Không request nào bị chặn, vì admin dùng `rate_limiter_admin` (100 req/phút). Payload token xác nhận role:
+
+```json
+{"sub":"teacher","role":"admin","iat":1795684863,"exp":1795688463}
+```
+
+#### Hạn chế lớn nhất của rate limiter này
+
+Comment ở `rate_limiter.py:5` tự nhận: *"Trong production: thay bằng Redis-based rate limiter để scale"*. Lý do nằm ở dòng 27:
+
+```python
+self._windows: dict[str, deque] = defaultdict(deque)
+```
+
+State nằm trong **RAM của từng process**. Hai hệ quả:
+
+1. **Chạy nhiều instance thì limit nhân lên.** 3 replica = mỗi replica đếm riêng = user gọi được 30 req/phút thay vì 10. Load balancer chia request ra nên không instance nào thấy đủ 10.
+2. **Restart là mất sạch.** Deploy lại hoặc container restart thì mọi bộ đếm về 0, user bị chặn có thể gọi tiếp ngay.
+
+Đây đúng là bài học của Part 5 (stateless) và là tiêu chí chấm của Part 6: rate limit state **bắt buộc** phải nằm trong Redis, không phải trong RAM.
+
+#### Lỗi gặp phải: `ModuleNotFoundError: No module named 'jwt'`
+
+Thư mục này có `requirements.txt` riêng, cần `pyjwt>=2.9.0` mà venv chưa có. Xử lý:
+
+```bash
+pip install -r 04-api-gateway/production/requirements.txt
+```
+
+Lưu ý tên package: cài là `pyjwt` nhưng import là `import jwt`. Trên PyPI còn một package khác tên thật là `jwt` — cài nhầm thì `import jwt` vẫn chạy nhưng API khác hẳn và vỡ ở `jwt.encode()`.
+
+Lỗi này minh hoạ đúng vấn đề mà Part 1–2 đặt ra: mỗi phần có dependencies riêng, chạy trên máy thật thì phải nhớ cài đúng. Trong container, `pip install -r requirements.txt` là một layer bắt buộc của image — không ai quên được, và mọi máy đều giống nhau.
 
 ### Exercise 4.4 — Cost guard
 
-<!-- TODO: giải thích cách làm. Nhớ nêu: rate limit bảo vệ tốc độ, cost guard bảo vệ tiền — vì sao cần cả hai -->
+#### Cost guard đo cái gì
+
+Không đếm request mà đếm **token quy ra tiền** (`cost_guard.py:33-36`), theo đơn giá GPT-4o-mini khai ở dòng 20–21:
+
+```python
+PRICE_PER_1K_INPUT_TOKENS  = 0.00015   # $0.15 / 1M input
+PRICE_PER_1K_OUTPUT_TOKENS = 0.0006    # $0.60 / 1M output
+```
+
+Output đắt gấp **4 lần** input — nên một prompt ngắn sinh ra câu trả lời dài vẫn tốn nhiều tiền. Đếm request không phản ánh được điều đó.
+
+#### Ba tầng bảo vệ, ba mã lỗi khác nhau
+
+| Tầng | Điều kiện | Mã trả về | Dòng |
+|---|---|---:|---|
+| Global budget | Tổng mọi user ≥ $10/ngày | **503** Service Unavailable | 68–73 |
+| Per-user budget | Một user ≥ $1/ngày | **402** Payment Required | 76–85 |
+| Cảnh báo sớm | User ≥ 80% budget | log `WARNING` | 88–91 |
+
+**Vì sao global là 503 mà per-user là 402?** 402 nói thẳng "anh đã tiêu hết phần của anh" — user tự biết phải chờ sang ngày hoặc nâng gói. 503 chỉ nói "dịch vụ tạm ngưng", **không tiết lộ** cho user A biết rằng user B đã tiêu hết ngân sách chung. Nói ra thì vừa vô ích với user A, vừa lộ thông tin vận hành nội bộ.
+
+#### Thứ tự gọi: check trước, record sau
+
+`app.py` gọi `check_budget()` **trước** khi gọi LLM và `record_usage()` **sau** khi có kết quả. Lý do: chặn phải xảy ra trước lúc tiêu tiền, còn ghi nhận thì phải đợi mới biết output dài bao nhiêu token.
+
+#### Vì sao cần cả rate limit lẫn cost guard
+
+Hai thứ bảo vệ hai tài nguyên khác nhau, và **thiếu một trong hai là có lỗ hổng**:
+
+| | Rate limit | Cost guard |
+|---|---|---|
+| Bảo vệ | Tốc độ, tài nguyên server | Tiền trả cho LLM |
+| Đơn vị đếm | Số request | Token → USD |
+| Chặn được | Spam nhiều request nhỏ | Prompt khổng lồ |
+
+- **10 request với prompt 100k token** → rate limit cho qua hết (chưa tới 10 req/phút), cost guard chặn.
+- **10.000 request tí hon** → cost guard cho qua (tổng tiền nhỏ), rate limit chặn.
+
+#### Kiểm chứng — tái hiện cả 402 và 503
+
+Mỗi request thật chỉ tốn ~$0.0000177, nên để chạm $1 cần hàng chục nghìn request — không gọi tay được. Thay vào đó test thẳng class `CostGuard` với budget hạ thấp, **không sửa code bài lab**:
+
+```python
+cg = CostGuard(daily_budget_usd=0.001)
+for i in range(1, 9):
+    try:
+        cg.check_budget("student")
+        cg.record_usage("student", input_tokens=200, output_tokens=800)
+        ...
+    except HTTPException as e:
+        print(f"req {i}: HTTP {e.status_code}  detail={e.detail}")
+```
+
+**Demo 1 — per-user budget → 402:**
+
+```
+budget = $0.001/ngay | moi request = 200 input + 800 output tokens
+chi phi moi request = $0.000510
+
+req 1: 200 OK   cost=$0.000510  used=51.0%
+req 2: 200 OK   cost=$0.001020  used=102.0%
+req 3: HTTP 402  detail={'error': 'Daily budget exceeded', 'used_usd': 0.00102,
+                         'budget_usd': 0.001, 'resets_at': 'midnight UTC'}
+```
+
+**Demo 2 — global budget → 503** (nhiều user, mỗi user vẫn dưới hạn mức riêng):
+
+```
+global budget = $0.002/ngay
+userA: 200 OK   global_cost=$0.000510
+userB: 200 OK   global_cost=$0.001020
+userC: 200 OK   global_cost=$0.001530
+userD: 200 OK   global_cost=$0.002040
+userE: HTTP 503  detail=Service temporarily unavailable due to budget limits.
+```
+
+Log tương ứng phía server:
+
+```
+INFO:cost_guard:Usage: user=student req=1 cost=$0.0005/0.001
+INFO:cost_guard:Usage: user=student req=2 cost=$0.0010/0.001
+CRITICAL:cost_guard:GLOBAL BUDGET EXCEEDED: $0.0020
+```
+
+Đúng như thiết kế: per-user dùng `logger.info`, còn global dùng `logger.critical` (dòng 69) — vượt ngân sách toàn hệ thống là sự cố cần đánh thức người trực, không phải chuyện thường ngày.
+
+Endpoint `/me/usage` cho user tự xem mức tiêu thụ:
+
+```json
+{"user_id":"teacher","date":"2026-11-26","requests":15,"input_tokens":30,
+ "output_tokens":442,"cost_usd":0.00027,"budget_usd":1.0,
+ "budget_remaining_usd":0.99973,"budget_used_pct":0.0}
+```
+
+#### Hai vấn đề phát hiện được
+
+**1. Chặn SAU khi đã tiêu quá.** Demo 1 cho thấy request 2 kết thúc ở **102%** budget — tức đã vượt trần rồi mới bị chặn ở request 3. Nguyên nhân: `check_budget()` chỉ so chi phí **đã tiêu** với trần (dòng 76), không ước lượng chi phí của request sắp tới. Với prompt lớn, một request duy nhất có thể vượt xa ngân sách mà vẫn lọt. Chữa được bằng cách ước lượng token đầu vào rồi cộng thêm trước khi so sánh — chính là tham số `estimated_cost` trong đề bài `CODE_LAB.md`.
+
+**2. Ngưỡng cảnh báo 80% có thể bị nhảy qua hoàn toàn.** Trong Demo 1, log `WARNING` không hề xuất hiện: tại lần `check` của request 2 mức tiêu thụ mới là 51% (dưới 80%), đến lần `check` của request 3 đã là 102% và bị ném 402 ngay ở dòng 77 — không bao giờ chạm tới nhánh warning ở dòng 88. Cảnh báo sớm chỉ hoạt động khi mỗi request nhỏ so với budget.
+
+#### Hạn chế chung — giống hệt rate limiter
+
+Dòng 49: `self._records: dict[str, UsageRecord] = {}` — lại là **RAM**, đúng như comment dòng 9 tự nhận.
+
+Hậu quả ở đây **nghiêm trọng hơn** rate limiter:
+
+- **Restart là xoá sạch lịch sử chi tiêu.** User tiêu hết $1, container restart, lại tiêu tiếp từ $0. Rate limit bị reset thì cùng lắm mất vài giây bảo vệ; budget bị reset thì mất tiền thật.
+- **Nhiều instance thì ngân sách nhân lên.** 3 replica = mỗi replica đếm riêng = $3/ngày/user thay vì $1. Biến `self._global_cost` (dòng 51) còn vô nghĩa hơn: nó chỉ là tổng của *một* process, không phải của hệ thống.
+
+Đây là lý do cost guard state **bắt buộc** nằm trong Redis ở Part 6, và cũng là tiêu chí chấm "Cost guard (vượt ngân sách → 402)" trong RUBRIC.
 
 ---
 
@@ -529,17 +764,127 @@ pkill -f "python app.py"
 
 ### Exercise 5.1–5.5
 
-**`/health` (liveness) khác `/ready` (readiness) ở đâu:** <!-- TODO -->
+#### `/health` (liveness) khác `/ready` (readiness) ở đâu
 
-**Vì sao state trong RAM hỏng khi chạy nhiều instance:** <!-- TODO -->
+| | `/health` — liveness | `/ready` — readiness |
+|---|---|---|
+| Câu hỏi | "Process còn sống không?" | "Nhận request được chưa?" |
+| Ai gọi | Platform (K8s, Railway) | Load balancer |
+| Fail thì sao | **Restart container** | **Ngừng route traffic vào** |
+| Phụ thuộc ngoài | Không kiểm tra | Có kiểm tra (Redis, DB…) |
 
-Kết quả `docker compose -p k5-day14-scaling up -d --build --scale agent=3` rồi `python test_stateless.py`:
+Khác biệt then chốt: liveness **không được** kiểm tra dependency bên ngoài. Nếu `/health` fail khi Redis chết, platform sẽ restart container — mà restart app không làm Redis sống lại. Kết quả là vòng lặp restart vô tận trong khi lỗi nằm ở chỗ khác.
+
+Readiness thì ngược lại, **phải** kiểm tra dependency. Agent không có Redis thì không phục vụ được, nên LB cần biết để ngừng gửi traffic — nhưng giữ container sống để nó tự phục hồi khi Redis quay lại.
+
+**Kiểm chứng bằng cách giết Redis thật:**
+
+```bash
+curl -s -w "%{http_code}" http://localhost:8080/health
+curl -s -w "%{http_code}" http://localhost:8080/ready
+```
+
+Trước khi tắt Redis:
+```
+health: 200  {"status":"ok","instance_id":"instance-a2d3b5","uptime_seconds":34.0,"storage":"redis","redis_connected":true}
+ready : 200  {"ready":true,"instance":"instance-c8b214"}
+```
+
+```bash
+docker stop k5-day14-scaling-redis-1
+```
+
+Sau khi tắt Redis:
+```
+health: 200  {"status":"degraded","instance_id":"instance-5c3fa5","uptime_seconds":46.0,"storage":"redis","redis_connected":false}
+ready : 503  {"detail":"Redis not available"}
+```
+
+Chính xác như thiết kế: `/health` **vẫn 200** nhưng đổi `status` thành `degraded` và `redis_connected: false` — app còn sống, đừng restart tôi. Còn `/ready` trả **503** (`app.py:210-214`) — đừng gửi traffic cho tôi lúc này.
+
+```bash
+docker start k5-day14-scaling-redis-1
+# → ready: 200
+```
+
+Tự phục hồi, không cần can thiệp. Nếu `/health` cũng fail theo Redis thì container đã bị giết và restart nhiều vòng trước khi Redis kịp quay lại.
+
+#### Vì sao state trong RAM hỏng khi chạy nhiều instance
+
+Load balancer rải request ra nhiều instance, mỗi instance là một process riêng với vùng nhớ riêng. State trong RAM instance này thì instance kia không thấy.
+
+Ba hậu quả cụ thể, đều đã gặp trong lab:
+
+1. **Session mất giữa chừng** — user chat 2 câu, câu 1 vào instance A, câu 2 vào instance B không biết gì về câu 1.
+2. **Rate limit nhân lên** — 3 replica × 10 req/phút = thực tế 30 req/phút (Part 4, `rate_limiter.py:27`).
+3. **Budget nhân lên** — 3 replica × $1/ngày = $3/ngày (Part 4, `cost_guard.py:49`).
+
+Cộng thêm: restart là mất sạch. Deploy lại thì mọi session, bộ đếm, lịch sử chi tiêu về 0.
+
+Giải pháp: đẩy state ra kho dùng chung (Redis). Instance trở thành **stateless** — thay thế được, khởi động lại được, nhân bản được tuỳ ý.
+
+#### Kết quả `test_stateless.py` với 3 instance
+
+```bash
+touch .env.local      # file này trong .gitignore, phải tự tạo
+docker compose -p k5-day14-scaling up -d --build --scale agent=3
+python test_stateless.py
+```
 
 ```
-<!-- TODO -->
+Request 1: [instance-c8b214]  Q: What is Docker?
+Request 2: [instance-a2d3b5]  Q: Why do we need containers?
+Request 3: [instance-5c3fa5]  Q: What is Kubernetes?
+Request 4: [instance-c8b214]  Q: How does load balancing work?
+Request 5: [instance-a2d3b5]  Q: What is Redis used for?
+
+------------------------------------------------------------
+Total requests: 5
+Instances used: {'instance-5c3fa5', 'instance-a2d3b5', 'instance-c8b214'}
+✅ All requests served despite different instances!
+
+--- Conversation History ---
+Total messages: 10
+  [user]: What is Docker?...
+  [assistant]: Container là cách đóng gói app để chạy ở mọi nơi...
+  [user]: Why do we need containers?...
+  [assistant]: Đây là câu trả lời từ AI agent (mock)...
+  [user]: What is Kubernetes?...
+  [assistant]: Tôi là AI agent được deploy lên cloud...
+  [user]: How does load balancing work?...
+  [assistant]: Đây là câu trả lời từ AI agent (mock)...
+  [user]: What is Redis used for?...
+  [assistant]: Agent đang hoạt động tốt! (mock response)...
+
+✅ Session history preserved across all instances via Redis!
 ```
 
-Giải thích kết quả: <!-- TODO -->
+**Giải thích kết quả:**
+
+5 request được rải qua **cả 3 instance** — thấy rõ qua `instance_id` khác nhau ở mỗi dòng, và request 4 quay lại `instance-c8b214` (Nginx round-robin). Không instance nào xử lý trọn vẹn cuộc hội thoại.
+
+Nhưng `history` vẫn đủ **10 message** (5 cặp user/assistant) đúng thứ tự. Điều này chỉ xảy ra được vì session lưu trong Redis chứ không trong RAM của từng agent. Nếu state nằm trong RAM, mỗi instance sẽ chỉ nhớ 1–2 message của riêng nó, và kết quả sẽ là 3 mẩu hội thoại rời rạc.
+
+Đây là định nghĩa thực hành của **stateless**: instance không giữ gì riêng, nên LB gửi request đi đâu cũng cho cùng kết quả.
+
+Trạng thái stack:
+
+```
+NAME                       SERVICE   STATUS                    PORTS
+k5-day14-scaling-agent-1   agent     Up (healthy)              8000/tcp
+k5-day14-scaling-agent-2   agent     Up (healthy)              8000/tcp
+k5-day14-scaling-agent-3   agent     Up (healthy)              8000/tcp
+k5-day14-scaling-nginx-1   nginx     Up                        0.0.0.0:8080->80/tcp
+k5-day14-scaling-redis-1   redis     Up (healthy)              6379/tcp
+```
+
+Chỉ nginx publish port ra host; 3 agent và Redis chỉ mở cổng trong network nội bộ.
+
+#### Lỗi gặp phải
+
+**`ConnectionRefusedError: [Errno 111] Connection refused`** khi chạy `test_stateless.py`. Nguyên nhân: chạy script trước khi dựng stack — script gọi `http://localhost:8080` (`test_stateless.py:16`) nhưng chưa có gì nghe ở đó. Docstring đầu file nói rõ *"Chạy sau khi docker compose up"*.
+
+**`env file .env.local not found`** khi `docker compose up`. Giống hệt Part 2: file nằm trong `.gitignore` nên không có trong repo. Xử lý: `touch .env.local`.
 
 <!-- Nhớ dọn: docker compose -p k5-day14-scaling down -->
 
