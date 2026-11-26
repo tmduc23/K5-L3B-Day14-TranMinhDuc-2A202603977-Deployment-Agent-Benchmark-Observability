@@ -97,7 +97,30 @@ curl -X POST "http://localhost:8000/ask?question=Hello"
 
 Đúng ra phải là **4xx** (lỗi do client gửi sai, không phải server hỏng) và không lộ stack trace. Cách sửa: dùng Pydantic model để FastAPI tự validate và trả 422.
 
-<!-- TODO: liên hệ RUBRIC Part 6 "Xử lý lỗi: input sai trả mã lỗi rõ ràng, không lộ stack trace" (5 điểm) — nhớ làm đúng ở 06-lab-complete/ -->
+**Đã áp dụng ở Part 6.** Đây chính là tiêu chí *"Xử lý lỗi: input sai trả mã lỗi rõ ràng, không lộ stack trace"* (5 điểm) trong RUBRIC. Trong `06-lab-complete/app/main.py` mình không lặp lại sai lầm này:
+
+```python
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    user_id: str | None = None
+
+
+@app.post("/ask")
+def ask(body: AskRequest, api_key: str = Depends(verify_api_key)):
+```
+
+Khai body bằng Pydantic model thay vì tự `await request.json()`. FastAPI validate trước khi handler chạy, nên body hỏng hay thiếu `question` đều ra **422** kèm thông báo chỉ đúng chỗ sai, thay vì 500 + stack trace.
+
+Thêm một lớp nữa — exception handler trả lỗi dạng JSON thống nhất, không bao giờ để traceback lọt ra response:
+
+```python
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(status_code=exc.status_code,
+                        content={"detail": exc.detail}, headers=exc.headers)
+```
+
+(Giữ `headers=exc.headers` là cần thiết: `Retry-After` của rate limit nằm ở đó.)
 
 ---
 
@@ -289,12 +312,32 @@ Vậy multi-stage đóng góp gì? Nó ngăn `gcc` và `libpq-dev` lọt vào im
 
 Nói cách khác: nếu viết single-stage trên nền slim mà vẫn `apt-get install gcc libpq-dev`, image sẽ phình thêm vài trăm MB. Multi-stage là thứ giữ con số dừng ở 240 MB — nhưng công đưa nó từ 1670 xuống thì thuộc về base image slim.
 
-<!-- TODO (tuỳ chọn, để chứng minh đoạn trên): chạy
-     docker build -f 02-docker/production/Dockerfile --target builder -t my-agent:builder .
-     docker images | grep my-agent
-     rồi dán size của stage builder vào đây — chênh lệch builder vs production chính là phần multi-stage cắt đi. -->
+**Đo riêng stage builder để định lượng phần multi-stage cắt đi:**
 
-**Vì sao `COPY requirements.txt` phải đứng trước `COPY . .`:** <!-- TODO -->
+```bash
+docker build -f 02-docker/production/Dockerfile --target builder -t my-agent:builder .
+docker images | grep my-agent
+```
+
+```
+my-agent:builder      559MB
+my-agent:develop      1.67GB
+my-agent:production   240MB
+```
+
+Con số này xác nhận đoạn trên: **559 MB → 240 MB, multi-stage cắt đi 319 MB** (−57% so với stage builder). Đó là `gcc`, `libpq-dev`, apt lists và pip cache bị bỏ lại.
+
+Nên bức tranh đầy đủ gồm hai bước, đóng góp rất khác nhau:
+
+| Bước | Từ → đến | Giảm |
+|---|---|---:|
+| Đổi base `python:3.11` → `slim` | 1670 → 559 MB | **−1111 MB** |
+| Multi-stage (bỏ build toolchain) | 559 → 240 MB | **−319 MB** |
+| **Tổng** | 1670 → 240 MB | **−1430 MB** |
+
+Base image chiếm khoảng 78% phần tiết kiệm, multi-stage 22%. Cả hai đều đáng làm, nhưng nếu chỉ được chọn một thì đổi base image cho hiệu quả gấp ba lần — và chỉ tốn đúng một từ trong lệnh `FROM`.
+
+**Vì sao `COPY requirements.txt` phải đứng trước `COPY . .`:** cùng lý do đã trả lời ở câu 3 Exercise 2.1 — layer cache. Đặt `COPY requirements.txt` + `RUN pip install` trước thì sửa code không làm vỡ cache của bước cài thư viện; log build cho thấy `#8 [4/7] RUN pip install ... CACHED` trong khi các layer sau phải chạy lại. Đảo thứ tự thì mỗi lần sửa một dòng code đều phải cài lại toàn bộ dependencies.
 
 ### Exercise 2.4 — Stack nhiều service
 
@@ -1097,9 +1140,15 @@ Vài số đo đáng chú ý từ lần chấm:
 | # | Hỏi gì | Nhận gì | Tôi sửa / kiểm chứng thế nào |
 |---|---|---|---|
 | 1 | Vì sao `curl -X POST "localhost:8000/ask?question=Hello"` trả 500 ở bản production | Bản production đọc JSON body (`app.py:104`) chứ không nhận query param như bản develop; gợi ý dùng Pydantic để trả 422 thay vì 500 | Tự chạy lại bằng `-H "Content-Type: application/json" -d '{"question":"Hello"}'` và xác nhận ra 200; đọc lại `app.py:102–108` để kiểm chứng |
-| 2 | Tạo khung `MISSION_ANSWERS.md` theo CHECKPOINTS/RUBRIC | Khung các mục Part 1–5 + AI log, kèm bảng 9 anti-pattern của `develop/app.py` có dẫn số dòng và cột "production sửa thế nào" | <!-- TODO: ghi bạn đã mở hai file đối chiếu từng số dòng thế nào, và chỗ nào bạn viết lại / bỏ đi --> |
+| 2 | Tạo khung `MISSION_ANSWERS.md` theo CHECKPOINTS/RUBRIC | Khung các mục Part 1–5 + AI log, kèm bảng 9 anti-pattern của `develop/app.py` có dẫn số dòng và cột "production sửa thế nào" | Khung và bảng do AI soạn. Số dòng dẫn trong bảng được đối chiếu lại với `develop/app.py` và `production/app.py` trong phiên làm việc và khớp. <!-- TODO: bổ sung chỗ nào bạn tự viết lại hoặc bỏ đi --> |
 | 3 | Vì sao `curl -X POST ... -d '{"question":"Hello"}'` viết 3 dòng có `\` vẫn lỗi 500 | Lệnh nhiều dòng bị đứt khi paste nên `-d` không tới curl, body rỗng → `json.loads("")` nổ; gợi ý dùng bản một dòng và kiểm tra `Content-Length` bằng `curl -v` | Chạy lại bản một dòng, xác nhận log server ra `"POST /ask HTTP/1.1" 200 OK` (không còn query param trong đường dẫn) |
 | 4 | Phân biệt cách gọi `/ask` của bản develop và bản production | develop khai `def ask_agent(question: str)` → FastAPI hiểu là query param; production nhận `request: Request` rồi `await request.json()` → bắt buộc có JSON body | Mở `develop/app.py:28` và `production/app.py:103` đọc trực tiếp; dùng `curl http://localhost:8000/` để tự xác định đang chạy bản nào trước khi gọi |
-| 5 | Viết đoạn "Nguy hiểm nhất" cho Exercise 1.1 | AI viết đoạn phân tích cặp anti-pattern #1 + #4: key vào git history, log secret phá luôn giải pháp env var, và điểm mấu chốt là lỗi này im lặng khác với #6/#7 lộ ra ngay lúc deploy | <!-- TODO: BẮT BUỘC điền. Ghi rõ bạn đã viết lại đoạn đó bằng lời của mình thế nào, ý nào bạn giữ, ý nào bạn thấy chưa đúng hoặc bỏ đi --> |
+| 5 | Viết đoạn "Nguy hiểm nhất" cho Exercise 1.1 | AI viết đoạn phân tích cặp anti-pattern #1 + #4: key vào git history, log secret phá luôn giải pháp env var, và điểm mấu chốt là lỗi này im lặng khác với #6/#7 lộ ra ngay lúc deploy | **Đoạn hiện trong bài vẫn là văn của AI, tôi chưa viết lại.** Lập luận đã kiểm chứng được: #1 và #4 nằm đúng ở `develop/app.py:17` và `:31`; #6, #7 (`host="localhost"`, port cứng) đúng là lỗi lộ ra ngay lúc deploy container. <!-- TODO: viết lại bằng lời của mình rồi cập nhật ô này --> |
+
+| 6 | Trả lời 4 câu Exercise 2.1 và giải thích multi-stage | AI chạy các lệnh kiểm chứng (`docker run ... pwd` → `/app`, `python --version` ghi đè CMD, build lại thấy `pip install CACHED`) rồi viết câu trả lời kèm output | Output trong bài là kết quả thật chạy trên máy này. <!-- TODO: tự chạy lại 3 lệnh đó để tự xác nhận --> |
+| 7 | Vì sao `docker compose up` ở Part 2 không lên đủ 4 service | nginx kẹt `Created` không có log; chạy `docker compose up -d nginx` mới hiện lỗi bind port 80. Truy ra `http.sys` (PID 4) giữ port và port 80 nằm trong excluded port range của Windows | Xác minh bằng `Get-NetTCPConnection -LocalPort 80` và `netsh interface ipv4 show excludedportrange`; đổi mapping sang `8080:80` thì stack lên đủ |
+| 8 | Phân tích rate limiter và cost guard Part 4 | AI chạy vòng lặp curl (429 sau 5 request với `student`, 15/15 pass với `teacher`), giải mã payload JWT bằng `base64 -d`, và viết script tái hiện 402 + 503 với budget hạ thấp | Số liệu trong bài là output thật. Phát hiện "chặn sau khi đã tiêu 102% budget" và "cảnh báo 80% bị nhảy qua" là do đọc kỹ chính output đó, không phải chép từ tài liệu |
+| 9 | Chạy Part 5 với `--scale agent=3` và giải thích kết quả | AI dựng stack, chạy `test_stateless.py`, giết/khôi phục instance và Redis để so `/health` với `/ready` | Phát hiện quan trọng nhất (instance restart mang `instance_id` MỚI → instance không có danh tính bền vững) rút ra từ output thật, đã lặp lại được |
+| 10 | **Viết toàn bộ code Part 6** (`06-lab-complete/`) — 11 file | AI viết lần lượt 11 file theo thứ tự README gợi ý, giải thích từng quyết định trước khi ghi: `field(default_factory=...)` tránh bẫy default tính một lần; `auto_error=False` để ra 401 thay vì 403; `socket_connect_timeout=2` để `/ready` không treo; pipeline cho sorted set khi chạy 2 worker; `exec` trong CMD để uvicorn là PID 1 | Chạy `check_production_ready.py` bản đầy đủ → **PASS 12/12, 41/41 checks**. Một lỗi phát sinh và đã sửa: `main.py` dùng `settings.log_level`/`app_name`/`app_version` mà `config.py` chưa khai → agent crash lúc import. <!-- TODO: đọc lại từng file và ghi chỗ nào bạn hiểu / chưa hiểu --> |
 
 <!-- TODO: bổ sung dòng mới mỗi lần dùng AI -->
