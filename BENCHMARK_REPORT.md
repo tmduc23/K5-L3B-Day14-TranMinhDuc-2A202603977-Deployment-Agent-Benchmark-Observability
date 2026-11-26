@@ -146,10 +146,27 @@ Ba chi tiết khiến job này dùng được thật:
 
 ### 4.1 Screenshot
 
-- [ ] Dashboard Grafana khi đang có tải (thấy rõ Golden Signals)
-- [ ] Một trace chậm trong Jaeger (thấy span nào chiếm thời gian)
-- [ ] Một trace lỗi trong Jaeger (có event `exception`)
-- [ ] Trang Alerts của Prometheus với ít nhất 1 alert đang **firing**
+- [x] [`screenshots/grafana-dashboard.png`](screenshots/grafana-dashboard.png) — dashboard *Day 14 — AI Agent Overview* lúc đang bị phá
+- [x] [`screenshots/jaeger-slow-trace.png`](screenshots/jaeger-slow-trace.png) — trace `e936e8c...`, 2,1 s
+- [x] [`screenshots/jaeger-error-trace.png`](screenshots/jaeger-error-trace.png) — trace `079bf38...` với event `exception`
+- [x] [`screenshots/prometheus-alert-firing.png`](screenshots/prometheus-alert-firing.png) — **3 alert cùng FIRING**
+
+**Đọc dashboard Grafana theo 4 Golden Signals** (số lấy từ chính ảnh đã chụp):
+
+| Golden Signal | Panel | Giá trị lúc chụp | Đọc ra điều gì |
+|---|---|---|---|
+| **Traffic** | Traffic (req/s) | 19,1 req/s | Tải nền Locust 40 user |
+| **Errors** | Error rate | **20,64%** 🔴 | Khớp gần như chính xác `MOCK_ERROR_RATE=0.2` đã bơm vào — metric phản ánh đúng thứ ta cố ý gây ra |
+| **Latency** | Latency p95 | **1,91 s** 🔴 | Vượt ngưỡng 1 s của `AgentHighLatencyP95`, đúng lý do alert đó firing |
+| **Saturation** | Saturation (in-flight) | 14 | Request đang xử lý đồng thời; còn xa giới hạn nên nghẽn **không** do quá tải mà do chậm nội tại |
+| *(bổ sung)* | Instances up | 2 | Cả 2 replica đều scrape được → `AgentInstanceDown` vẫn INACTIVE |
+| *(bổ sung)* | LLM cost (1h) | **$5,5857** 🔴 | Vượt ngưỡng $2/giờ → `LLMCostBurnRateHigh` firing |
+
+Panel *Latency /ask — p50/p95/p99* cho thấy rõ thời điểm phá hệ thống: trước **19:52** các đường nằm sát nhau dưới 500 ms, sau đó p95/p99 bật lên trên đường ngưỡng 1 s trong khi **p50 gần như không đổi** — đúng hiện tượng tail latency đã phân tích ở mục 2.2, lần này nhìn thấy trực tiếp trên biểu đồ.
+
+Panel *LLM latency p95 theo model* cho thấy đường `mock-llm-large` xuất hiện từ 19:52 ở mức ~2 s, trong khi `mock-llm-small` trước đó chỉ ~200 ms. Panel *Requests/s theo status code* có đường `503` tách khỏi `200` đúng cùng thời điểm.
+
+Ba panel độc lập cùng chỉ về một mốc thời gian — đó là cách dashboard giúp khoanh vùng nguyên nhân trước khi mở trace.
 
 Trước khi phá, unit test rule bằng promtool:
 
