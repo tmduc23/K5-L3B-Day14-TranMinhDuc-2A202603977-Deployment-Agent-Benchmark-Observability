@@ -434,17 +434,84 @@ Chi tiết xem `DEPLOYMENT.md`.
 
 ### Exercise 4.1–4.3 — Kết quả test
 
-401 — thiếu / sai API key:
+#### Exercise 4.1 — API Key Authentication (`04-api-gateway/develop/`)
+
+Code phân biệt **hai** mã lỗi, không gộp làm một (`app.py:43-52`):
+
+| Ca | Header gửi đi | Mã trả về | Ý nghĩa |
+|---|---|---:|---|
+| Thiếu key | *(không có)* | **401** Unauthorized | "Chưa xưng danh" |
+| Key sai | `X-API-Key: sai-be-be` | **403** Forbidden | "Xưng rồi nhưng không có quyền" |
+| Key đúng | `X-API-Key: demo-key-***` | **200** OK | Được phục vụ |
+
+**401 — thiếu key:**
+
+```bash
+curl -X POST http://localhost:8000/ask -H "Content-Type: application/json" -d '{"question":"hello"}'
+```
+```
+HTTP 401
+```
+Server: `detail: "Missing API key. Include header: X-API-Key: <your-key>"` (`app.py:44-47`)
+
+**403 — key sai:**
+
+```bash
+curl -X POST http://localhost:8000/ask -H "X-API-Key: sai-be-be" -H "Content-Type: application/json" -d '{"question":"hello"}'
+```
+```
+HTTP 403
+```
+Server: `detail: "Invalid API key."` (`app.py:49-52`)
+
+**200 — key đúng:**
+
+```bash
+curl -i -X POST http://localhost:8000/ask -H "X-API-Key: ***" -H "Content-Type: application/json" -d '{"question":"hello"}'
+```
+```
+HTTP/1.1 200 OK
+date: Thu, 26 Nov 2026 09:09:21 GMT
+server: uvicorn
+content-length: 145
+content-type: application/json
+
+{"question":"hello","answer":"Đây là câu trả lời từ AI agent (mock). Trong production, đây sẽ là response từ OpenAI/Anthropic."}
+```
+
+Log phía server:
 
 ```
-<!-- TODO: dán output curl -i, che token -->
+INFO:     127.0.0.1:52470 - "POST /ask HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:45270 - "POST /ask HTTP/1.1" 403 Forbidden
+INFO:     127.0.0.1:33824 - "POST /ask HTTP/1.1" 200 OK
 ```
 
-200 — có token hợp lệ:
+**401 vs 403 — vì sao tách:** 401 nghĩa là client *chưa* cung cấp danh tính, nên hợp lệ khi bảo nó "gửi header X-API-Key đi". 403 nghĩa là danh tính *đã* có nhưng không được chấp nhận — gửi lại cùng key đó cũng vô ích.
+
+Đáng chú ý: nhiều API production **cố tình gộp cả hai thành 401**. Lý do là 403 vô tình tiết lộ "key này tồn tại nhưng sai", giúp kẻ tấn công phân biệt được key hợp lệ với key bịa — hữu ích khi dò key hàng loạt. Đây là đánh đổi giữa thông báo lỗi rõ ràng cho lập trình viên và việc không rò rỉ thông tin cho kẻ tấn công.
+
+#### Hai lỗi gặp phải khi làm 4.1
+
+**1. File tự in ra lệnh test sai.** `app.py:88` in gợi ý `curl -H 'X-API-Key: ...' http://localhost:8000/ask?question=hello` — dùng query param. Nhưng code ở dòng 73 lại `await request.json()`, tức đòi JSON body. Làm theo gợi ý đó thì dính 500 + `JSONDecodeError`, y hệt lỗi đã gặp ở Part 1. Docstring đầu file (dòng 11–20) mới là lệnh đúng.
+
+**2. Server cũ chiếm port → chẩn đoán nhầm 403.** Gọi curl với key mặc định mà vẫn 403, trong khi log server in rõ `API Key: demo-key-change-in-production`. Nguyên nhân: một tiến trình `python app.py` cũ vẫn giữ port 8000 với key khác. Server mới in key ra **rồi mới** bind port và chết:
 
 ```
-<!-- TODO -->
+API Key: demo-key-change-in-production
+Test: curl -H 'X-API-Key: demo-key-change-in-production' ...
+INFO:     Will watch for changes in these directories: [...]
+ERROR:    [Errno 98] Address already in use
 ```
+
+Nghĩa là dòng `API Key:` thuộc về tiến trình **đã chết**, còn tiến trình trả lời curl là tiến trình **cũ** mang key khác. Xử lý:
+
+```bash
+ss -ltnp | grep :8000      # tìm tiến trình đang giữ port
+pkill -f "python app.py"
+```
+
+**Bài học:** uvicorn in log ứng dụng *trước khi* bind port, nên thấy log khởi động không có nghĩa server đang phục vụ. Chỉ dòng `Uvicorn running on http://0.0.0.0:8000` mới xác nhận điều đó. Đây đúng là loại lỗi "im lặng" mà readiness probe sinh ra để bắt — app tưởng đã chạy nhưng thực tế không nhận được request nào.
 
 429 — vượt rate limit (dùng vòng lặp curl của chính bạn):
 
