@@ -894,7 +894,100 @@ Cộng thêm: restart là mất sạch. Deploy lại thì mọi session, bộ đ
 
 Giải pháp: đẩy state ra kho dùng chung (Redis). Instance trở thành **stateless** — thay thế được, khởi động lại được, nhân bản được tuỳ ý.
 
-#### Kết quả `test_stateless.py` với 3 instance
+#### Exercise 5.3 — Stateless design
+
+Tìm chỗ lưu state trong `production/app.py`:
+
+```bash
+grep -n "_redis\|history" 05-scaling-reliability/production/app.py
+```
+
+```
+5:Mọi state (session, conversation history) lưu trong Redis.
+38:    _redis = redis.from_url(REDIS_URL, decode_responses=True)
+39:    _redis.ping()
+63:        _redis.setex(f"session:{session_id}", ttl_seconds, serialized)
+71:        data = _redis.get(f"session:{session_id}")
+76:def append_to_history(session_id: str, role: str, content: str):
+86:    if len(history) > 20:
+140:    append_to_history(session_id, "user", body.question)
+```
+
+**Cách refactor:** state không nằm trong biến toàn cục mà đi qua hai hàm `save_session()` / `load_session()` (dòng 59–73). Mọi truy cập state đều qua Redis với key `session:{session_id}`.
+
+Ba chi tiết thiết kế đáng chú ý:
+
+**1. `setex` chứ không phải `set`** (dòng 63) — session tự hết hạn sau 3600 giây. Không có TTL thì Redis phình vô hạn vì session cũ chẳng ai xoá.
+
+**2. Cắt history ở 20 message** (dòng 86–87): `history = history[-20:]`. Hội thoại dài vô hạn sẽ làm payload phình và chi phí LLM tăng theo mỗi lượt.
+
+**3. Có fallback in-memory** (dòng 34–45): không kết nối được Redis thì rơi về `_memory_store: dict` và in cảnh báo `"⚠️ Redis not available — using in-memory store (not scalable!)"`. Tiện khi chạy local một mình, nhưng **nguy hiểm trên production**: app vẫn chạy bình thường, không báo lỗi, chỉ âm thầm mất tính stateless. Scale lên 3 instance thì session vỡ mà không có dấu hiệu gì ngoài một dòng log lúc khởi động.
+
+Đây đúng loại đánh đổi cần cân nhắc: thuận tiện lúc dev, nhưng trên production thà **fail fast** — không có Redis thì từ chối khởi động — còn hơn chạy sai một cách im lặng.
+
+#### Exercise 5.4 — Load balancing
+
+**Round-robin:** gọi `/health` 9 lần qua Nginx (port 8080):
+
+```bash
+for i in $(seq 1 9); do
+  curl -s http://localhost:8080/health | sed -n 's/.*"instance_id":"\([^"]*\)".*/\1/p'
+done
+```
+
+```
+instance-575c1a
+instance-efd631
+instance-9a4b02
+instance-575c1a
+instance-efd631
+instance-9a4b02
+instance-575c1a
+instance-efd631
+instance-9a4b02
+```
+
+Chu kỳ đúng bằng 3 và lặp lại y hệt — Nginx chia đều tuần tự, không ưu tiên instance nào.
+
+**Failover — giết 1 instance:**
+
+```bash
+docker stop k5-day14-scaling-agent-2
+```
+
+```
+instance-efd631    200
+instance-575c1a    200
+instance-efd631    200
+instance-575c1a    200
+instance-efd631    200
+...  (9/9 request đều 200)
+```
+
+Không request nào lỗi. Nginx loại instance chết khỏi vòng xoay và chia cho 2 instance còn lại — chu kỳ rút từ 3 xuống 2. Người dùng không thấy gì bất thường.
+
+**Khôi phục:**
+
+```bash
+docker start k5-day14-scaling-agent-2
+```
+
+```
+instance-575c1a
+instance-efd631
+instance-b37a4c     ← ID MỚI
+instance-575c1a
+instance-efd631
+instance-b37a4c
+```
+
+**Chi tiết quan trọng nhất của cả bài test này:** instance vừa sống lại mang ID **`b37a4c`**, không phải `9a4b02` như trước khi chết. `INSTANCE_ID` được sinh lúc process khởi động, nên restart là có danh tính mới.
+
+Hệ quả: **instance không có danh tính bền vững**. Bất cứ thứ gì gắn với một instance cụ thể — session trong RAM, bộ đếm rate limit, lịch sử chi tiêu — đều biến mất cùng nó và không ai lấy lại được. Đây là lập luận cuối cùng, và mạnh nhất, cho việc đẩy toàn bộ state ra Redis: không phải vì "nhiều instance cần chia sẻ", mà vì **chính instance là thứ dùng một lần rồi bỏ**.
+
+Container trong production bị thay liên tục: deploy phiên bản mới, autoscale co giãn, node bảo trì, OOM kill. Thiết kế nào giả định instance sống lâu đều sai.
+
+#### Exercise 5.5 — Test stateless
 
 ```bash
 touch .env.local      # file này trong .gitignore, phải tự tạo
