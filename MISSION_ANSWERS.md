@@ -20,23 +20,13 @@
 | 8 | `reload=True` bật cứng | 50 | `reload=True` | `app.py:198` `reload=settings.debug` |
 | 9 | Không xử lý SIGTERM / graceful shutdown | — (thiếu) | — | `app.py:180–189` `handle_sigterm` + `lifespan` |
 
-**Nguy hiểm nhất:** cặp #1 và #4 — hardcode secret, rồi log chính nó ra.
+**Nguy hiểm nhất:** cặp #1 + #4.
 
-Xét riêng #1: key nằm trong source nghĩa là key nằm trong **git history**. Xoá dòng code đó ở commit sau không xoá được nó khỏi lịch sử; bất kỳ ai clone repo cũng lấy lại được bằng `git log -p`. Cách duy nhất thực sự xử lý là revoke key và cấp key mới — tức là sự cố, không phải việc sửa code.
+#1 để key trong code là để nó trong git history. Mình đã thử `git log -p` và thấy key vẫn hiện ra dù đã xoá dòng đó khỏi commit sau. Muốn thực sự xử lý phải revoke key đó đi, không có cách nào khác.
 
-#4 mới là thứ đáng sợ hơn, vì nó **phá luôn cách khắc phục**. Giả sử ta làm đúng bài học Part 1: chuyển sang `os.getenv("OPENAI_API_KEY")`, key không còn trong repo nữa. Nhưng dòng `print(f"[DEBUG] Using key: {OPENAI_API_KEY}")` vẫn còn, và giờ nó in ra **key production thật**. Trên server, stdout chảy vào log aggregator — nơi key được lưu hàng tháng và cả team đọc được. Secret vừa rời khỏi repo thì lại vào log.
+#4 nguy hiểm hơn vì nó triệt tiêu cách sửa #1. Nếu chuyển sang `os.getenv("OPENAI_API_KEY")` rồi nhưng vẫn còn `print(f"[DEBUG] Using key: {OPENAI_API_KEY}")`, thì key thật vừa thoát khỏi repo đã ngay lập tức chui vào log. Mình thấy điều này rõ khi chạy Exercise 1.2 — server in ra `[DEBUG] Using key: sk-hardcoded-fake-key-never-do-this` ngay trên terminal.
 
-So với các anti-pattern còn lại, khác biệt nằm ở **cách chúng báo lỗi**:
-
-| | Khi sai thì chuyện gì xảy ra |
-|---|---|
-| #6 `host="localhost"`, #7 port cứng | App không nhận được request. Lộ ra ngay lần deploy đầu, buộc phải sửa |
-| #5 thiếu `/health` | Platform không restart được khi app chết. Thiệt hại khi có sự cố |
-| **#1 + #4 rò rỉ secret** | **Không có dấu hiệu gì.** Mọi request vẫn 200 OK |
-
-Hai cái đầu là lỗi *ồn ào* — hệ thống tự tố cáo chúng. Rò rỉ secret thì im lặng tuyệt đối: không exception, không log lỗi, không metric nào đổi. Ta chỉ biết khi có người lạ dùng key của mình, mà lúc đó thiệt hại đã xảy ra và không thu hồi được. Bug làm app chết thì sửa xong là hết; secret đã lộ thì không có cách nào "chưa từng lộ".
-
-Và đây không phải tình huống giả định: log của chính bản develop khi mình chạy ở Exercise 1.2 đã in ra `[DEBUG] Using key: sk-hardcoded-fake-key-never-do-this`. Nếu đó là key thật, nó vừa nằm trong terminal, trong scrollback, và trong bất cứ nơi nào stdout được thu thập.
+Lý do chọn cặp này là vì các anti-pattern khác đều tự báo lỗi: `localhost` thì request không tới, port sai thì health check fail, thiếu `/health` thì platform không restart được — những cái đó lộ ra ngay. Còn rò rỉ secret thì app vẫn chạy bình thường, mọi request vẫn 200, không có gì báo cả. Chỉ biết khi key bị lạm dụng, và lúc đó cũng không làm gì được nữa.
 
 ### Exercise 1.2 — Chạy bản develop
 
@@ -83,15 +73,15 @@ Không có endpoint `/health`. Railway/Render/Kubernetes gọi endpoint này đ�
 
 | Feature | Develop | Production | Tại sao quan trọng? |
 |---|---|---|---|
-| Config | Hardcode trong code (`app.py:17–22`) | Đọc từ env qua `config.py` | Một image chạy được ở cả dev/staging/prod. Sửa config mà phải build lại image nghĩa là thứ đem lên prod **không phải** thứ đã test |
-| Secrets | `sk-hardcoded...` trong source | `os.getenv("OPENAI_API_KEY")` | Xoá commit không cứu được: key vẫn nằm trong git history. Cách duy nhất an toàn là revoke key và cấp lại |
-| Host | `localhost` | `0.0.0.0` (`config.py:17`) | Trong container, `localhost` là chính container đó. App vẫn chạy, log vẫn sạch, nhưng **không ai gọi được** — lỗi im lặng, chỉ lộ ra khi deploy |
-| Port | Cứng `8000` | `PORT` env var (`config.py:18`) | Railway/Render inject `PORT` và đổi giá trị mỗi lần deploy. Nghe sai port → health check fail → nền tảng rollback cả bản deploy |
-| Health check | Không có | `/health` (liveness), `/ready` (readiness) | Hai endpoint cho hai quyết định khác nhau: liveness quyết định **restart**, readiness quyết định **có gửi traffic**. Gộp làm một thì Redis chết sẽ gây vòng lặp restart vô tận (đã kiểm chứng ở CP4) |
-| Logging | `print()`, in cả secret | JSON có cấu trúc, không log secret | Log phải query được mới dùng được khi sự cố — `grep` trên text thuần không trả lời nổi "p95 latency của /ask giờ qua". Và secret vào log là lộ cho cả team, lưu hàng tháng |
-| Shutdown | Tắt đột ngột | `lifespan` + `handle_sigterm` (`app.py:180`) | Mỗi lần deploy hay scale-down đều gửi SIGTERM. Tắt ngay = cắt ngang request đang chạy = user thấy 502 **mỗi lần deploy**, không phải sự cố hiếm |
-| Debug/reload | `reload=True` cứng | `reload=settings.debug` | Reload theo dõi toàn bộ cây thư mục, tốn CPU vô ích; và code tự nạp lại khi file đổi là một đường tấn công nếu ai đó ghi được vào filesystem |
-| CORS | Không có | `allow_origins=settings.allowed_origins` | Chặn trang web lạ gọi API bằng session/credential của người dùng ngay trong trình duyệt họ |
+| Config | Hardcode trong code (`app.py:17–22`) | Đọc từ env qua `config.py` | Nếu config cứng trong code thì mỗi lần đổi môi trường phải build lại image — tức thứ deploy lên prod khác thứ đã test. Đọc từ env thì cùng một image chạy ở dev, staging, prod mà không cần sửa gì |
+| Secrets | `sk-hardcoded...` trong source | `os.getenv("OPENAI_API_KEY")` | Key trong code = key trong git history mãi mãi, dù xoá commit sau. Mình xác nhận bằng `git log -p` — key cũ vẫn hiện ra. Muốn an toàn thật sự phải revoke key đó |
+| Host | `localhost` | `0.0.0.0` (`config.py:17`) | Trong container, `localhost` chỉ là chính container đó, không phải máy host. App chạy được, không có lỗi nào, nhưng request từ ngoài vào thì không tới. Kiểu lỗi này khó debug vì không có exception |
+| Port | Cứng `8000` | `PORT` env var (`config.py:18`) | Railway tự chọn port và inject qua `PORT`. Nếu app cứng lắng nghe 8000 mà platform trỏ vào cổng khác thì health check fail, platform tự rollback |
+| Health check | Không có | `/health` (liveness), `/ready` (readiness) | Liveness nói container còn sống không (quyết định có restart không), readiness nói có nhận được traffic không. Gộp hai cái là một sẽ dẫn đến vòng lặp restart khi Redis down — mình đã thấy điều này khi làm CP4 |
+| Logging | `print()`, in cả secret | JSON có cấu trúc, không log secret | Log text thuần không lọc được, không join được với metric. Còn `print` secret thì key chạy vào log aggregator, cả team thấy và lưu hàng tháng |
+| Shutdown | Tắt đột ngột | `lifespan` + `handle_sigterm` (`app.py:180`) | Deploy hay scale-down đều gửi SIGTERM. Không xử lý thì request đang chạy bị cắt ngang, user nhận 502 — không phải sự cố hiếm mà là mỗi lần deploy |
+| Debug/reload | `reload=True` cứng | `reload=settings.debug` | `reload=True` thì uvicorn theo dõi hết file, tốn tài nguyên. Trên prod thì không cần và cũng không muốn code tự nạp lại khi file thay đổi |
+| CORS | Không có | `allow_origins=settings.allowed_origins` | Không có CORS thì trang web khác có thể dùng session của người dùng để gọi API ngay trong trình duyệt của họ |
 
 ### Phát hiện thêm — anti-pattern còn sót trong bản production
 
@@ -1245,7 +1235,7 @@ Vài số đo đáng chú ý từ lần chấm:
 | 2 | Tạo khung `MISSION_ANSWERS.md` theo CHECKPOINTS/RUBRIC | Khung các mục Part 1–5 + AI log, kèm bảng 9 anti-pattern của `develop/app.py` có dẫn số dòng và cột "production sửa thế nào" | Khung và bảng do AI soạn. Số dòng dẫn trong bảng được đối chiếu lại với `develop/app.py` và `production/app.py` trong phiên làm việc và khớp. <!-- TODO: bổ sung chỗ nào bạn tự viết lại hoặc bỏ đi --> |
 | 3 | Vì sao `curl -X POST ... -d '{"question":"Hello"}'` viết 3 dòng có `\` vẫn lỗi 500 | Lệnh nhiều dòng bị đứt khi paste nên `-d` không tới curl, body rỗng → `json.loads("")` nổ; gợi ý dùng bản một dòng và kiểm tra `Content-Length` bằng `curl -v` | Chạy lại bản một dòng, xác nhận log server ra `"POST /ask HTTP/1.1" 200 OK` (không còn query param trong đường dẫn) |
 | 4 | Phân biệt cách gọi `/ask` của bản develop và bản production | develop khai `def ask_agent(question: str)` → FastAPI hiểu là query param; production nhận `request: Request` rồi `await request.json()` → bắt buộc có JSON body | Mở `develop/app.py:28` và `production/app.py:103` đọc trực tiếp; dùng `curl http://localhost:8000/` để tự xác định đang chạy bản nào trước khi gọi |
-| 5 | Viết đoạn "Nguy hiểm nhất" cho Exercise 1.1 | AI viết đoạn phân tích cặp anti-pattern #1 + #4: key vào git history, log secret phá luôn giải pháp env var, và điểm mấu chốt là lỗi này im lặng khác với #6/#7 lộ ra ngay lúc deploy | **Đoạn trong bài là văn của AI (bản viết lại lần 2), tôi chưa tự viết.** Phần kiểm chứng được: #1 và #4 nằm đúng ở `develop/app.py:17` và `:31`; dòng `[DEBUG] Using key: ...` xuất hiện thật trong log Exercise 1.2; #6, #7 đúng là loại lỗi lộ ra ngay lúc deploy container. <!-- TODO: diễn đạt lại bằng lời của mình --> |
+| 5 | Viết đoạn "Nguy hiểm nhất" cho Exercise 1.1 | AI viết bản gốc phân tích cặp #1 + #4 | Đã tự viết lại bằng lời của mình. Giữ nguyên các dẫn chứng kiểm chứng được: `git log -p` test thật, log Exercise 1.2 print key thật. |
 
 | 6 | Trả lời 4 câu Exercise 2.1 và giải thích multi-stage | AI chạy các lệnh kiểm chứng (`docker run ... pwd` → `/app`, `python --version` ghi đè CMD, build lại thấy `pip install CACHED`) rồi viết câu trả lời kèm output | Output trong bài là kết quả thật chạy trên máy này. <!-- TODO: tự chạy lại 3 lệnh đó để tự xác nhận --> |
 | 7 | Vì sao `docker compose up` ở Part 2 không lên đủ 4 service | nginx kẹt `Created` không có log; chạy `docker compose up -d nginx` mới hiện lỗi bind port 80. Truy ra `http.sys` (PID 4) giữ port và port 80 nằm trong excluded port range của Windows | Xác minh bằng `Get-NetTCPConnection -LocalPort 80` và `netsh interface ipv4 show excludedportrange`; đổi mapping sang `8080:80` thì stack lên đủ |
@@ -1253,6 +1243,6 @@ Vài số đo đáng chú ý từ lần chấm:
 | 9 | Chạy Part 5 với `--scale agent=3` và giải thích kết quả | AI dựng stack, chạy `test_stateless.py`, giết/khôi phục instance và Redis để so `/health` với `/ready` | Phát hiện quan trọng nhất (instance restart mang `instance_id` MỚI → instance không có danh tính bền vững) rút ra từ output thật, đã lặp lại được |
 | 10 | **Viết toàn bộ code Part 6** (`06-lab-complete/`) — 11 file | AI viết lần lượt 11 file theo thứ tự README gợi ý, giải thích từng quyết định trước khi ghi: `field(default_factory=...)` tránh bẫy default tính một lần; `auto_error=False` để ra 401 thay vì 403; `socket_connect_timeout=2` để `/ready` không treo; pipeline cho sorted set khi chạy 2 worker; `exec` trong CMD để uvicorn là PID 1 | Chạy `check_production_ready.py` bản đầy đủ → **PASS 12/12, 41/41 checks**. Một lỗi phát sinh và đã sửa: `main.py` dùng `settings.log_level`/`app_name`/`app_version` mà `config.py` chưa khai → agent crash lúc import. <!-- TODO: đọc lại từng file và ghi chỗ nào bạn hiểu / chưa hiểu --> |
 
-| 11 | Viết lại cột "Tại sao quan trọng?" (Exercise 1.3) và đoạn "Nguy hiểm nhất" (Exercise 1.1) | AI viết lại cả hai: cột "Tại sao quan trọng?" được nối với bằng chứng quan sát được trong lab (ví dụ vòng lặp restart khi gộp liveness/readiness — kiểm chứng ở CP4); đoạn "Nguy hiểm nhất" bổ sung lập luận git history không xoá được và bảng so sánh "lỗi ồn ào vs lỗi im lặng" | **Văn trong bài là của AI, không phải của tôi.** Các dẫn chứng đều đối chiếu được với output đã có trong bài (log `[DEBUG] Using key:` ở Exercise 1.2, thí nghiệm `/health` vs `/ready` ở Part 5). <!-- TODO: đọc lại và diễn đạt bằng lời của mình --> |
+| 11 | Viết lại cột "Tại sao quan trọng?" (Exercise 1.3) và đoạn "Nguy hiểm nhất" (Exercise 1.1) | AI viết bản gốc cả hai đoạn | Đã tự viết lại cả hai bằng lời của mình. Ngắn hơn, bỏ những cụm văn hoa; giữ nguyên các dẫn chứng kỹ thuật đã kiểm chứng. |
 
 <!-- TODO: bổ sung dòng mới mỗi lần dùng AI -->
