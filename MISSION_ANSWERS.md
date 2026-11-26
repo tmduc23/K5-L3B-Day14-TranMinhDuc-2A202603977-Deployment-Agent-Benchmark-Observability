@@ -764,6 +764,77 @@ Hậu quả ở đây **nghiêm trọng hơn** rate limiter:
 
 ### Exercise 5.1–5.5
 
+#### Exercise 5.1 — Health checks (`05-scaling-reliability/develop/`)
+
+Hai endpoint đã viết sẵn, khác nhau ở **thứ chúng kiểm tra**:
+
+`/health` (dòng 104–143) kiểm tra sức khoẻ **nội tại** của process — uptime, memory qua `psutil` — rồi tổng hợp thành `status: "ok"` hoặc `"degraded"`. Không đụng tới dependency ngoài.
+
+`/ready` (dòng 147–167) chỉ xét cờ `_is_ready`, ném **503** khi chưa sẵn sàng, và trả kèm `in_flight_requests` — số request đang xử lý dở.
+
+```bash
+curl -s http://localhost:8000/health
+curl -s http://localhost:8000/ready
+```
+
+```json
+// /health
+{"status":"ok","uptime_seconds":34.7,"version":"1.0.0","environment":"development",
+ "timestamp":"2026-11-26T09:43:20.840092+00:00",
+ "checks":{"memory":{"status":"ok","note":"psutil not installed"}}}
+
+// /ready
+{"ready":true,"in_flight_requests":1}
+```
+
+Hai chi tiết đáng chú ý:
+
+**`psutil not installed`** — `/health` cố import `psutil` để đo memory, không có thì rơi vào `except ImportError` và vẫn báo `status: "ok"` (dòng 130–131). Đây là cách xử lý đúng cho liveness: thiếu một công cụ đo lường **không** phải lý do để platform giết container. Nếu code ném lỗi ở đây, container sẽ bị restart vô cớ chỉ vì thiếu một thư viện phụ trợ.
+
+**`in_flight_requests: 1`** — chính request `/ready` đang được đếm. Middleware (dòng 72) tăng bộ đếm khi request vào và giảm khi xong, nên lúc handler chạy thì nó tự tính mình. Con số này là thứ `lifespan` chờ về 0 khi shutdown.
+
+Gọi `/ask` đúng cú pháp (query param, không phải JSON body):
+
+```bash
+curl -s -X POST "http://localhost:8000/ask?question=test"
+```
+```json
+{"answer":"Agent đang hoạt động tốt! (mock response) Hỏi thêm câu hỏi đi nhé."}
+```
+
+Gọi sai (gửi JSON body) thì FastAPI trả **422** với thông báo chỉ đúng chỗ sai:
+
+```json
+{"detail":[{"type":"missing","loc":["query","question"],"msg":"Field required","input":null}]}
+```
+
+So sánh với `01-localhost-vs-production/production/app.py`: cùng loại lỗi nhưng file đó trả **500 + stack trace**. Khác biệt là file này để FastAPI tự validate tham số, còn file kia tự gọi `await request.json()` nên exception lọt ra ngoài. Đây đúng là cách sửa đã đề xuất ở phần *Phát hiện thêm* của Part 1.
+
+#### Exercise 5.2 — Graceful shutdown
+
+Nhấn `Ctrl+C` khi server đang chạy:
+
+```
+^CINFO:     Shutting down
+INFO:     Waiting for application shutdown.
+2026-11-26 09:41:18,816 INFO 🔄 Graceful shutdown initiated...
+2026-11-26 09:41:18,816 INFO ✅ Shutdown complete
+INFO:     Application shutdown complete.
+INFO:     Finished server process [11107]
+2026-11-26 09:41:18,817 INFO Received signal 2 — uvicorn will handle graceful shutdown
+```
+
+Server **chạy qua trình tự shutdown** thay vì chết ngay — khác hẳn `01-localhost-vs-production/develop/app.py` vốn không có gì cả. Phần shutdown nằm trong `lifespan` (dòng 56–67): đặt `_is_ready = False` rồi chờ `_in_flight_requests` về 0, tối đa 30 giây.
+
+**Thứ tự dòng log tiết lộ cơ chế thật.** Dòng `Received signal 2` xuất hiện **cuối cùng**, sau cả `Shutdown complete`. Hai điều rút ra:
+
+1. **Signal 2 là SIGINT** (`Ctrl+C`), không phải SIGTERM (15) mà platform gửi. Cả hai đều được đăng ký ở dòng 186–187.
+2. **Handler của mình không phải thứ dọn dẹp.** Uvicorn bắt signal trước, chạy xong toàn bộ `lifespan` shutdown, rồi handler ở dòng 183 mới được gọi — lúc đó mọi việc đã xong. Đúng như comment ở dòng 180 nói: *"uvicorn bắt SIGTERM tự động và gọi lifespan shutdown"*. Handler này chỉ để ghi log, việc dọn dẹp thật thuộc về `lifespan`.
+
+Đây là điểm dễ hiểu sai: viết logic cleanup trong `signal.signal()` handler thì nó chạy **sau** khi app đã đóng, thường là quá muộn. Chỗ đúng để dọn dẹp là phần sau `yield` của `lifespan`.
+
+**Không quan sát được dòng `Waiting for N in-flight requests...`** vì `/ask` ở bản develop (dòng 93–97) trả về tức thì, không kịp có request nào còn dở khi nhấn `Ctrl+C`. Muốn thấy phải tạo request đủ chậm.
+
 #### `/health` (liveness) khác `/ready` (readiness) ở đâu
 
 | | `/health` — liveness | `/ready` — readiness |
