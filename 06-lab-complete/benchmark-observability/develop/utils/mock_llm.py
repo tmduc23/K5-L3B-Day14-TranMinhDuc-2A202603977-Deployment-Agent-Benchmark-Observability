@@ -112,6 +112,20 @@ KNOWLEDGE_BASE: list[tuple[list[str], str]] = [
     (["cloud run", "serverless", "railway", "render"],
      "Cloud Run, Railway, Render là nền tảng chạy container managed: tự scale, tự cấp HTTPS, "
      "bạn chỉ cần cung cấp image và biến môi trường."),
+
+    # ── Bổ sung sau eval v2 (Exercise 7.3) ──
+    # eval_v2.json cho thấy hai câu trượt vì KNOWLEDGE_BASE không có tài liệu
+    # nào khớp. Thêm đúng hai mục, không sửa mục cũ, để tránh regression.
+    # scaling-03 — missing_keywords: ['cpu', 'memory', 'custom metrics']
+    (["hpa", "kubernetes", "autoscal", "horizontal pod"],
+     "Kubernetes HPA (Horizontal Pod Autoscaler) tự động scale số pod dựa trên cpu, memory "
+     "hoặc custom metrics như RPS và độ dài hàng đợi. HPA đọc metrics theo chu kỳ rồi tăng "
+     "giảm replica trong khoảng min/max đã đặt."),
+    # security-02 — missing_keywords: ['token', 'hết hạn', 'chữ ký']
+    (["jwt", "json web token"],
+     "API key là chuỗi bí mật cố định, không tự hết hạn, muốn thu hồi phải revoke thủ công. "
+     "JWT là token có chữ ký số, payload chứa user và thời điểm hết hạn (exp); server chỉ cần "
+     "xác minh chữ ký là tin được nội dung, không phải tra database mỗi request."),
 ]
 
 # Agent v1 không có retrieval → chỉ "biết" vài câu chung chung như mock cũ

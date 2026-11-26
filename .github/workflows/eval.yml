@@ -1,0 +1,68 @@
+# ============================================================
+# Quality gate — Exercise 7.3 bước 2
+#
+# Chặn merge khi agent trả lời sai quá nhiều, hoặc khi có regression
+# so với baseline đã commit. Nguyên tắc: run_eval.py đã trả exit code
+# khác 0 khi quality gate fail, nên job chỉ cần KHÔNG nuốt mã lỗi đó —
+# GitHub tự đánh fail check và branch protection chặn merge.
+# ============================================================
+name: quality-gate
+
+on:
+  pull_request:
+    paths:
+      - "06-lab-complete/**"
+  push:
+    branches: [main]
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: 06-lab-complete/benchmark-observability/develop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start agent v2
+        run: |
+          AGENT_VERSION=v2 PORT=8002 nohup python app.py > /tmp/agent.log 2>&1 &
+          # Chờ agent sẵn sàng thay vì sleep cố định: sleep ngắn thì flaky,
+          # sleep dài thì CI chậm vô ích.
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8002/health > /dev/null && exit 0
+            sleep 1
+          done
+          echo "Agent không khởi động được trong 30s"; cat /tmp/agent.log; exit 1
+
+      - name: Run eval (fail nếu accuracy < 85% hoặc có regression)
+        run: |
+          mkdir -p reports
+          python eval/run_eval.py \
+            --url http://localhost:8002 \
+            --min-accuracy 0.85 \
+            --baseline reports/eval_v2_fixed.json \
+            --out reports/eval_ci.json
+
+      - name: Upload eval report
+        # Chạy cả khi bước trên fail — lúc fail mới là lúc cần xem report nhất.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: 06-lab-complete/benchmark-observability/develop/reports/eval_ci.json
+
+      - name: Agent logs khi thất bại
+        if: failure()
+        run: cat /tmp/agent.log
