@@ -134,9 +134,7 @@ Chỉ 9 request lọt trong vòng lặp này thay vì 10, vì lệnh test `/ask`
 - [x] [`screenshots/dashboard.png`](screenshots/dashboard.png) — Railway Deployments: trạng thái **ACTIVE**, "Deployment successful", domain public, region US West, 1 replica
 - [x] [`screenshots/running.png`](screenshots/running.png) — gọi URL public từ trình duyệt, agent trả JSON:
       `{"app":"Production AI Agent","version":"1.0.0","environment":"production","endpoints":["/health","/ready","/ask","/usage"]}`
-- [ ] `screenshots/test.png` — output 4 lệnh curl ở trên
-
-<!-- TODO: chụp test.png (nhớ để dòng KEY=... ra ngoài khung hình) -->
+- [x] [`screenshots/test.png`](screenshots/test.png) — output 4 lệnh curl: `200 / 200 / 401 / 200`, khớp đúng kỳ vọng. Lệnh chỉ in mã HTTP nên ảnh không lộ API key.
 
 ## Ghi chú khi deploy
 
